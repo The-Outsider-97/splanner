@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": false, "outDir": ".test-out", "rootDir": ".." },
+  "include": ["src/core/**/*.ts", "tests_ts/**/*.ts", "../tools/typings/*.d.ts"]
+}

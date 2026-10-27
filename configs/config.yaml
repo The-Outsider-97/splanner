@@ -1,0 +1,8 @@
+# SPlanner settings, read through SLAI's ConfigRepository. Every value is optional; the numbers below are the defaults.
+# Personal choices (theme, text size, week start, sounds ...) are not here: they are saved from the Appearance and Settings panels.
+app:
+  port: 8769                  # where SPlanner listens (127.0.0.1 only)
+  reminder_poll_seconds: 20   # how often an open page asks for due reminders
+  max_request_bytes: 524288   # largest request body the server accepts
+  backup_every_days: 7        # automatic database backup when the newest one is older than this (0 turns it off)
+  backup_keep: 8              # how many automatic backups to keep

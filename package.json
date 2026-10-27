@@ -1,0 +1,21 @@
+{
+  "name": "slai-splanner",
+  "version": "1.0.0",
+  "description": "SLAI SPlanner - a calendar, tasks, notes and sticky board on your own computer. TypeScript client + Python SLAI service, on the shared SLAI tools kit.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node ../tools/build/build-static.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test tests_ts/*.test.ts",
+    "test:compiled": "tsc -p tsconfig.test.json && node --test .test-out/splanner/tests_ts/*.test.js",
+    "test:py": "python3 -m unittest discover -s tests -t ../.. -v",
+    "test:e2e": "python3 -m unittest discover -s tests_e2e -v",
+    "start": "npm run build && python3 run_splanner.py"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
