@@ -97,7 +97,7 @@ export function mountNotes(host: HTMLElement, ctx: ViewContext): MountedView {
     bodyInput.value = next?.content ?? '';
     titleInput.readOnly = readonly; bodyInput.readOnly = readonly;
     statusEl = h('span', { class: 'save-state muted', attrs: { role: 'status', 'aria-live': 'polite' } });
-    noticeEl = h('div', { class: 'notice warn', hidden: !readonly, attrs: { role: 'note' } }, glyph('lock'), h('div', { class: 'grow', text: 'This note has formatting, images or a signature that SPlanner can’t edit without losing it, so it is read-only here. Open the .sldc file in Reader or Writer to change it.' }));
+    noticeEl = h('div', { class: 'notice warn', hidden: !readonly, attrs: { role: 'note' } }, glyph('lock'), h('div', { class: 'grow', text: next?.notice ?? 'This note has formatting, images or a signature that SPlanner can’t edit without losing it, so it is read-only here. Open the .sldc file in Reader or Writer to change it.' }));
     const pin = h('button', { class: 'iconbtn', type: 'button', attrs: { 'aria-label': next?.pinned ? 'Unpin note' : 'Pin note', 'aria-pressed': String(next?.pinned ?? false) }, disabled: !next, on: { click: () => { void togglePin(); } } }, glyph('pin'));
     pinButton = pin;
     replace(editorEl,

@@ -6,3 +6,5 @@ app:
   max_request_bytes: 524288   # largest request body the server accepts
   backup_every_days: 7        # automatic database backup when the newest one is older than this (0 turns it off)
   backup_keep: 8              # how many automatic backups to keep
+  alarm_ring_timeout_seconds: 120    # seconds of repeated ringing before automatic snooze
+  alarm_automatic_snooze_minutes: 5  # snooze duration after timeout, manual snooze unchanged

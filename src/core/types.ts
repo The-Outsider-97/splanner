@@ -38,7 +38,7 @@ export interface Task {
 export interface NoteSummary {
   id: string; title: string; kind: 'note' | 'sticky'; excerpt: string; pinned: boolean; version: number; created_at: string; updated_at: string;
 }
-export interface Note extends NoteSummary { content: string; editable: boolean }
+export interface Note extends NoteSummary { content: string; editable: boolean; /** Why it is read-only, when the server has something more specific to say (for example: written by a newer program). */ notice?: string }
 
 export interface Reminder {
   id: string; title: string; due_at: string; status: 'pending' | 'dismissed'; entity_type: string | null; entity_id: string | null;

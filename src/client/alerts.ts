@@ -1,7 +1,6 @@
-/** Reminder alerts while the page is open: polling, the in-app toast, the sound and (if allowed) a browser notification, plus the
- *  reminders panel behind the bell. SPlanner has no background service, so nothing can alert while the page is closed; the README says so. */
+/** SPlanner's persistent ringing alarm UI, polling and reminder controls. */
 import { Emitter, announce, glyph, h, openDialog, openMenu, replace, toast, type MenuEntry } from './kit.js';
-import { errorText, type Store } from './store.js';
+import { errorText } from './store.js';
 import type { EditorContext } from './editors.js';
 import { openReminderDialog } from './editors.js';
 import { moreButton } from './widgets.js';
@@ -9,80 +8,191 @@ import { SNOOZE_MINUTES, SNOOZE_UNITS, alertKey, customSnooze, dueNow, pending, 
 import { formatTime, parseInstant } from '../core/dates.js';
 import type { Reminder } from '../core/types.js';
 
+/** Persistent alarms use server-authoritative lifecycle state. Closing SPlanner
+ *  does not provide OS-level background audio; the backend catches up on reopen. */
 export class Alerts {
   readonly changed = new Emitter<void>();
   due: Reminder[] = [];
   private readonly seen = new Set<string>();
   private timer: number | undefined;
+  private wakeTimer: number | undefined;
+  private activeTimer: number | undefined;
   private firstPoll = true;
   private audio: HTMLAudioElement | null = null;
+  private audioBlocked = false;
+  private host: HTMLElement | null = null;
+  private polling = false;
+  private stopped = false;
 
   constructor(private readonly ctx: EditorContext) {
-    ctx.store.changed.on((kind) => { if (kind === 'reminders' || kind === 'all' || kind === 'events') this.recompute(); });
+    ctx.store.changed.on((kind) => {
+      if (kind === 'reminders' || kind === 'all' || kind === 'events') {
+        this.recompute();
+        this.scheduleWake();
+      }
+    });
   }
 
   start(): void {
+    this.stopped = false;
+    this.host = h('section', { class: 'alarm-stack', attrs: { 'aria-label': 'Ringing alarms', 'aria-live': 'polite' } });
+    document.body.append(this.host);
     void this.poll();
     this.timer = window.setInterval(() => { void this.poll(); }, Math.max(5, this.ctx.store.boot.settings.reminderPollSeconds) * 1000);
-    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') void this.poll(); });
+    document.addEventListener('visibilitychange', this.onVisibility);
+    this.scheduleWake();
   }
 
-  stop(): void { if (this.timer !== undefined) window.clearInterval(this.timer); }
+  private readonly onVisibility = (): void => {
+    if (document.visibilityState === 'visible') void this.poll();
+  };
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== undefined) window.clearInterval(this.timer);
+    if (this.wakeTimer !== undefined) window.clearTimeout(this.wakeTimer);
+    if (this.activeTimer !== undefined) window.clearInterval(this.activeTimer);
+    document.removeEventListener('visibilitychange', this.onVisibility);
+    this.stopSound();
+    this.host?.remove();
+    this.host = null;
+  }
 
   private recompute(): void {
-    this.due = dueNow(this.ctx.store.data.reminders, this.ctx.store.now());
+    this.due = dueNow(this.ctx.store.data.reminders, this.ctx.store.now())
+      .filter((r) => r.alarm_state === 'ringing');
+    this.render();
     this.changed.emit();
+  }
+
+  private scheduleWake(): void {
+    if (this.wakeTimer !== undefined) window.clearTimeout(this.wakeTimer);
+    if (this.stopped || !this.ctx.store.data) return;
+    const next = this.ctx.store.data.reminders
+      .filter((r) => r.status === 'pending' && r.alarm_state !== 'ringing')
+      .map((r) => parseInstant(r.due_at).getTime() - this.ctx.store.now().getTime())
+      .filter((ms) => ms > 0)
+      .sort((a, b) => a - b)[0];
+    if (next !== undefined) this.wakeTimer = window.setTimeout(() => { void this.poll(); }, Math.max(50, Math.min(2_147_000_000, next + 100)));
   }
 
   async poll(): Promise<void> {
-    let due: Reminder[];
-    try { due = await this.ctx.store.due(); } catch { return; }
-    this.ctx.store.offline.emit(null);
-    this.due = due;
-    const fresh = due.filter((r) => !this.seen.has(alertKey(r)));
-    for (const r of fresh) this.seen.add(alertKey(r));
-    this.changed.emit();
-    if (fresh.length > 0) this.announce(fresh);
-    this.firstPoll = false;
+    if (this.polling || this.stopped) return;
+    this.polling = true;
+    try {
+      const due = await this.ctx.store.due();
+      this.ctx.store.offline.emit(null);
+      this.due = due;
+      // Synchronize client-side reminder state too: otherwise the dashboard
+      // shows obsolete due dates after an automatic snooze.
+      await this.ctx.store.refreshReminders();
+      const fresh = due.filter((r) => !this.seen.has(alertKey(r)));
+      for (const r of fresh) this.seen.add(alertKey(r));
+      if (this.seen.size > 5000) this.seen.clear();
+      this.render();
+      this.changed.emit();
+      if (fresh.length) this.announce(fresh);
+      this.updateAudio();
+      if (this.activeTimer !== undefined && this.due.length === 0) {
+        window.clearInterval(this.activeTimer); this.activeTimer = undefined;
+      } else if (this.activeTimer === undefined && this.due.length > 0) {
+        // A one-second active check makes the two-minute cutoff visible at
+        // the correct instant while the page is not browser-throttled.
+        this.activeTimer = window.setInterval(() => { void this.poll(); }, 1000);
+      }
+    } catch {
+      // Offline is already surfaced by the shared API client. Keep the
+      // existing persistent alert visible until the server can be consulted.
+    } finally {
+      this.polling = false;
+      this.firstPoll = false;
+      this.scheduleWake();
+    }
+  }
+
+  private async act(reminder: Reminder, action: 'dismiss' | 'snooze'): Promise<void> {
+    this.stopSound();
+    try {
+      await this.ctx.store.changeReminder(reminder.id, {
+        action, ...(action === 'snooze' ? { minutes: 5 } : {}), alarm_revision: reminder.alarm_revision,
+      });
+      await this.poll();
+    } catch (error) {
+      toast(errorText(error), { kind: 'error' });
+      await this.poll();
+    }
+  }
+
+  private render(): void {
+    if (!this.host) return;
+    replace(this.host, this.due.map((r) =>
+      h('article', { class: 'persistent-alarm card', attrs: { role: 'alert', 'aria-label': `Alarm: ${r.title}` } },
+        h('div', { class: 'eyebrow', text: 'ALARM · RINGING' }),
+        h('strong', { class: 'persistent-alarm-title', text: r.title }),
+        h('div', { class: 'muted small', text: reminderTime(r, this.ctx.store.now(), this.ctx.store.prefs.time_format) }),
+        h('div', { class: 'row nowrap' },
+          h('button', { class: 'btn small', type: 'button', text: 'Snooze 5 min', on: { click: () => { void this.act(r, 'snooze'); } } }),
+          h('button', { class: 'btn primary small', type: 'button', text: 'Dismiss', on: { click: () => { void this.act(r, 'dismiss'); } } }),
+          this.audioBlocked ? h('button', { class: 'btn small ghost', type: 'button', text: 'Enable sound', on: { click: () => { this.audioBlocked = false; this.updateAudio(); } } }) : null,
+        ),
+      )));
   }
 
   private announce(fresh: Reminder[]): void {
-    const { store } = this.ctx;
     const first = fresh[0] as Reminder;
-    const label = fresh.length === 1 ? `${first.title} · ${reminderTime(first, store.now(), store.prefs.time_format)}` : `${fresh.length} reminders are due`;
-    toast(label, { timeoutMs: 15_000, action: { label: 'View', run: () => openRemindersDialog(this.ctx, this) } });
-    announce(`Reminder: ${label}`, 'assertive');
-    if (store.prefs.sound) this.playSound();
-    if (store.prefs.browser_notifications && 'Notification' in window && Notification.permission === 'granted') {
+    announce(`Alarm: ${first.title}`, 'assertive');
+    if (this.ctx.store.prefs.browser_notifications && 'Notification' in window && Notification.permission === 'granted') {
       for (const r of fresh.slice(0, 3)) {
-        try { new Notification(r.title, { body: reminderTime(r, store.now(), store.prefs.time_format), tag: alertKey(r), silent: true }); } catch { /* some browsers refuse outside a service worker */ }
+        try { new Notification(r.title, { body: 'Alarm is ringing. Open SPlanner to snooze or dismiss.', tag: alertKey(r), silent: true }); }
+        catch { /* OS/browser notifications may not be available */ }
       }
     }
   }
 
-  /** Play the chosen sound (also used by the settings page to preview). Browsers may refuse until the person has clicked on the page. */
-  playSound(file = this.ctx.store.prefs.sound_file, volume = this.ctx.store.prefs.sound_volume): void {
+  private stopSound(): void {
+    if (this.audio) {
+      this.audio.pause();
+      this.audio.currentTime = 0;
+      this.audio.src = '';
+      this.audio.load();
+      this.audio = null;
+    }
+  }
+
+  private updateAudio(): void {
+    if (!this.due.length || !this.ctx.store.prefs.sound || this.audioBlocked) { this.stopSound(); return; }
+    if (this.audio) return;
+    this.playSound(this.ctx.store.prefs.sound_file, this.ctx.store.prefs.sound_volume, true);
+  }
+
+  /** Used by Appearance for a single preview; looping is reserved for alarms. */
+  playSound(file = this.ctx.store.prefs.sound_file, volume = this.ctx.store.prefs.sound_volume, loop = false): void {
     try {
-      this.audio?.pause();
-      this.audio = new Audio(`/assets/audio/${file}.mp3`);
-      this.audio.volume = Math.min(1, Math.max(0, volume));
-      void this.audio.play().catch(() => undefined);
-    } catch { /* no audio available */ }
+      this.stopSound();
+      const audio = new Audio(`/assets/audio/${file}.mp3`);
+      audio.volume = Math.min(1, Math.max(0, volume));
+      audio.loop = loop;
+      this.audio = audio;
+      void audio.play().catch(() => {
+        if (loop && this.audio === audio) { this.audioBlocked = true; this.stopSound(); this.render(); }
+      });
+    } catch { if (loop) { this.audioBlocked = true; this.render(); } }
   }
 
   get firstPollDone(): boolean { return !this.firstPoll; }
 }
 
+
 /** Snooze a reminder for `minutes` and say when it will alert again. */
 function snooze(ctx: EditorContext, reminder: Reminder, minutes: number, after?: () => void): Promise<Reminder> {
-  return ctx.store.changeReminder(reminder.id, { action: 'snooze', minutes }).then((changed) => {
+  return ctx.store.changeReminder(reminder.id, { action: 'snooze', minutes, alarm_revision: reminder.alarm_revision }).then((changed) => {
     toast(`Snoozed until ${formatTime(parseInstant(changed.due_at), ctx.store.prefs.time_format)}`);
     after?.();
     return changed;
   });
 }
 
-/** "Snooze for ..." with a number and a unit; shows the time it will alert again as you type. */
+/** "Snooze for ..." with a number and a unit; shows when it will alert again. */
 export function openSnoozeDialog(ctx: EditorContext, reminder: Reminder, after?: () => void): void {
   const amount = h('input', { type: 'number', id: 'snooze-amount', value: '20', attrs: { min: '1', max: '43200', step: '1', 'aria-label': 'Snooze for' } });
   const unit = h('select', { id: 'snooze-unit', attrs: { 'aria-label': 'Unit' } }, SNOOZE_UNITS.map((u) => h('option', { value: u.unit, text: u.label })));
@@ -107,7 +217,7 @@ export function openSnoozeDialog(ctx: EditorContext, reminder: Reminder, after?:
   });
 }
 
-/** Snooze choices as menu entries: +1, +5, +10, +15, +30, +60 minutes, and a custom length. */
+/** Snooze choices: 1, 5, 10, 15, 30, 60 minutes and custom. */
 export function snoozeEntries(ctx: EditorContext, reminder: Reminder, after?: () => void): MenuEntry[] {
   const fail = (error: unknown): void => { toast(errorText(error), { kind: 'error' }); };
   return [
@@ -116,13 +226,13 @@ export function snoozeEntries(ctx: EditorContext, reminder: Reminder, after?: ()
   ];
 }
 
-/** The actions for one reminder, as menu entries (used by the dashboard, the panel and the bell). */
+/** Actions for one reminder (dashboard, panel, bell). */
 export function reminderEntries(ctx: EditorContext, reminder: Reminder, after?: () => void): MenuEntry[] {
   const run = (work: () => Promise<unknown>, done?: string): void => {
     work().then(() => { if (done) toast(done); after?.(); }).catch((error: unknown) => toast(errorText(error), { kind: 'error' }));
   };
   return [
-    { label: 'Dismiss', icon: 'check', run: () => run(() => ctx.store.changeReminder(reminder.id, { action: 'dismiss' })) },
+    { label: 'Dismiss', icon: 'check', run: () => run(() => ctx.store.changeReminder(reminder.id, { action: 'dismiss', alarm_revision: reminder.alarm_revision })) },
     ...snoozeEntries(ctx, reminder, after),
     'separator',
     { label: 'Edit', icon: 'edit', run: () => { void openReminderDialog(ctx, reminder).result.then(() => after?.()); } },
@@ -130,7 +240,7 @@ export function reminderEntries(ctx: EditorContext, reminder: Reminder, after?: 
   ];
 }
 
-/** A visible "Snooze" button for a reminder that is due, so it is one click to put it off. */
+/** Visible snooze action on a due reminder. */
 function snoozeButton(ctx: EditorContext, reminder: Reminder): HTMLButtonElement {
   const button: HTMLButtonElement = h('button', { class: 'btn small ghost snooze-btn', type: 'button', attrs: { 'aria-haspopup': 'menu', 'aria-label': `Snooze ${reminder.title}` },
     on: { click: (event) => { event.stopPropagation(); openMenu(button, snoozeEntries(ctx, reminder), { label: 'Snooze', align: 'end' }); } } }, glyph('clock'), 'Snooze');
