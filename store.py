@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -681,7 +680,10 @@ class PlannerStore:
                     changes["due_at"] = (datetime.now(timezone.utc) + timedelta(minutes=int(minutes or 0))).strftime("%Y-%m-%dT%H:%M:%S+00:00")
                 elif "due_at" not in changes:
                     raise BadRequest("Say how long to snooze for.", hint="Send minutes, or a new due_at.")
-                if changes["due_at"] <= v.utc_now():
+                snoozed_due_at = changes.get("due_at")
+                if snoozed_due_at is None:
+                    raise BadRequest("Say how long to snooze for.", hint="Send minutes, or a new due_at.")
+                if snoozed_due_at <= v.utc_now():
                     raise BadRequest("A snoozed reminder has to be due in the future.")
                 changes["status"] = "pending"
             if changes:
@@ -793,8 +795,13 @@ class PlannerStore:
     def occurrences(self, start: str | None = None, end: str | None = None) -> dict[str, Any]:
         """The occurrences of every repeating event that fall in ``[start, end)`` (a default window around now), and the window itself.
         Events that do not repeat are not included: they are their own occurrence and the client already has them."""
-        begin, finish = (self.default_window() if start is None and end is None else
-                         (v.instant(start, "from"), v.instant(end, "to")))                          # type: ignore[arg-type]
+        if start is None and end is None:
+            begin, finish = self.default_window()
+        elif start is None or end is None:
+            raise BadRequest("Both the start and end of the window are required.")
+        else:
+            begin, finish = v.instant(start, "from"), v.instant(end, "to")
+        assert begin is not None and finish is not None
         if finish <= begin:
             raise BadRequest("The window has to end after it starts.")
         if v.parse_instant(finish) - v.parse_instant(begin) > timedelta(days=MAX_WINDOW_DAYS):
