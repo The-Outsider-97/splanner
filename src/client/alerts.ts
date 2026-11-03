@@ -1,12 +1,36 @@
 /** SPlanner's persistent ringing alarm UI, polling and reminder controls. */
 import { Emitter, announce, glyph, h, openDialog, openMenu, replace, toast, type MenuEntry } from './kit.js';
-import { errorText } from './store.js';
+import { errorText, type ReminderChange } from './store.js';
 import type { EditorContext } from './editors.js';
 import { openReminderDialog } from './editors.js';
 import { moreButton } from './widgets.js';
 import { SNOOZE_MINUTES, SNOOZE_UNITS, alertKey, customSnooze, dueNow, pending, reminderTime, snoozeLabel, type SnoozeUnit } from '../core/reminders.js';
 import { formatTime, parseInstant } from '../core/dates.js';
 import type { Reminder } from '../core/types.js';
+
+/** The alarm lifecycle fields are present only when the server has the alarm migration.
+ *  Older installations return ordinary Reminder records without these keys.
+ */
+type LifecycleReminder = Reminder & {
+  alarm_state?: 'scheduled' | 'ringing' | 'snoozed' | 'dismissed';
+  alarm_revision?: number;
+};
+
+function alarmState(reminder: Reminder): LifecycleReminder['alarm_state'] {
+  return (reminder as LifecycleReminder).alarm_state;
+}
+
+/** Include the optimistic alarm revision only when supplied by the server.
+ *  The intermediate variable is intentionally structurally assignable to
+ *  ReminderChange, whose older API definition has no alarm_revision field.
+ */
+function reminderAction(reminder: Reminder, action: 'snooze' | 'dismiss', minutes?: number): ReminderChange {
+  const change: ReminderChange & { alarm_revision?: number } = { action };
+  if (minutes !== undefined) change.minutes = minutes;
+  const revision = (reminder as LifecycleReminder).alarm_revision;
+  if (typeof revision === 'number') change.alarm_revision = revision;
+  return change;
+}
 
 /** Persistent alarms use server-authoritative lifecycle state. Closing SPlanner
  *  does not provide OS-level background audio; the backend catches up on reopen. */
@@ -60,7 +84,7 @@ export class Alerts {
 
   private recompute(): void {
     this.due = dueNow(this.ctx.store.data.reminders, this.ctx.store.now())
-      .filter((r) => r.alarm_state === 'ringing');
+      .filter((r) => alarmState(r) === 'ringing' || alarmState(r) === undefined);
     this.render();
     this.changed.emit();
   }
@@ -69,7 +93,7 @@ export class Alerts {
     if (this.wakeTimer !== undefined) window.clearTimeout(this.wakeTimer);
     if (this.stopped || !this.ctx.store.data) return;
     const next = this.ctx.store.data.reminders
-      .filter((r) => r.status === 'pending' && r.alarm_state !== 'ringing')
+      .filter((r) => r.status === 'pending' && alarmState(r) !== 'ringing')
       .map((r) => parseInstant(r.due_at).getTime() - this.ctx.store.now().getTime())
       .filter((ms) => ms > 0)
       .sort((a, b) => a - b)[0];
@@ -113,9 +137,7 @@ export class Alerts {
   private async act(reminder: Reminder, action: 'dismiss' | 'snooze'): Promise<void> {
     this.stopSound();
     try {
-      await this.ctx.store.changeReminder(reminder.id, {
-        action, ...(action === 'snooze' ? { minutes: 5 } : {}), alarm_revision: reminder.alarm_revision,
-      });
+      await this.ctx.store.changeReminder(reminder.id, reminderAction(reminder, action, action === 'snooze' ? 5 : undefined));
       await this.poll();
     } catch (error) {
       toast(errorText(error), { kind: 'error' });
@@ -185,7 +207,7 @@ export class Alerts {
 
 /** Snooze a reminder for `minutes` and say when it will alert again. */
 function snooze(ctx: EditorContext, reminder: Reminder, minutes: number, after?: () => void): Promise<Reminder> {
-  return ctx.store.changeReminder(reminder.id, { action: 'snooze', minutes, alarm_revision: reminder.alarm_revision }).then((changed) => {
+  return ctx.store.changeReminder(reminder.id, reminderAction(reminder, 'snooze', minutes)).then((changed) => {
     toast(`Snoozed until ${formatTime(parseInstant(changed.due_at), ctx.store.prefs.time_format)}`);
     after?.();
     return changed;
@@ -232,7 +254,7 @@ export function reminderEntries(ctx: EditorContext, reminder: Reminder, after?: 
     work().then(() => { if (done) toast(done); after?.(); }).catch((error: unknown) => toast(errorText(error), { kind: 'error' }));
   };
   return [
-    { label: 'Dismiss', icon: 'check', run: () => run(() => ctx.store.changeReminder(reminder.id, { action: 'dismiss', alarm_revision: reminder.alarm_revision })) },
+    { label: 'Dismiss', icon: 'check', run: () => run(() => ctx.store.changeReminder(reminder.id, reminderAction(reminder, 'dismiss'))) },
     ...snoozeEntries(ctx, reminder, after),
     'separator',
     { label: 'Edit', icon: 'edit', run: () => { void openReminderDialog(ctx, reminder).result.then(() => after?.()); } },
