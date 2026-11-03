@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -434,13 +435,67 @@ class PlannerStore:
 
     @staticmethod
     def _plain_note(package: Any) -> bool:
-        """True when the note is exactly what SPlanner writes: one paragraph of plain text, unsigned, with nothing attached to the paragraph
-        (formatting, inline equations or pictures, comments' anchors and the like live in extra keys that editing the text would break)."""
+        """
+        Determine whether an SLDC document can safely be edited using SPlanner's plain-text note editor.
+        Uses the actual SLAI v2.4 SLDC version API.
+        Rich documents are opened read-only to prevent accidental loss of formatting, embedded assets, citations, comments,
+        signatures, or other advanced document features.
+        """
         module = slai.sldc()
-        if module.version_key(package.version) > module.version_key(module.KNOWN_VERSION):
-            return False                                            # a newer edition than this module can write back: never rewrite it
-        blocks = package.document["blocks"]
-        return not package.signatures and len(blocks) == 1 and blocks[0]["type"] == "paragraph" and set(blocks[0]) <= {"id", "type", "text"}
+
+        # SLAI v2.4 provides LATEST_KNOWN_VERSION and newest_version().
+        # The older version_key() and KNOWN_VERSION APIs do not exist.
+        known_version = getattr(
+            module,
+            "LATEST_KNOWN_VERSION",
+            module.FORMAT_VERSION,
+        )
+
+        # Reject documents newer than the currently supported format.
+        if module.newest_version(package.version, known_version) != known_version:
+            return False
+
+        # Never rewrite a document containing signatures, comments,
+        # or embedded assets using a plain-text editor.
+        if package.signatures or package.comments or package.assets:
+            return False
+
+        document = package.document
+
+        # Protect documents containing advanced publication features.
+        protected_fields = (
+            "publication",
+            "styles",
+            "sections",
+            "references",
+            "embeds",
+            "revision",
+            "history",
+            "extensions",
+            "provenance",
+        )
+
+        if any(document.get(field) for field in protected_fields):
+            return False
+
+        blocks = document.get("blocks", [])
+
+        # SPlanner can safely edit a document containing exactly
+        # one plain-text paragraph without advanced formatting.
+        if len(blocks) != 1:
+            return False
+
+        block = blocks[0]
+
+        if block.get("type") != "paragraph":
+            return False
+
+        allowed_fields = {"id", "type", "text"}
+
+        if not set(block).issubset(allowed_fields):
+            return False
+
+        return True
 
     def _write_package(self, note_id: str, title: str, text: str, *, overwrite: bool, package: Any = None) -> None:
         module = slai.sldc()
