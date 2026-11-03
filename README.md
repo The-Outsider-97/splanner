@@ -151,7 +151,10 @@ SPlanner does not claim any of these:
 * **Importing `.ics`**, or syncing with an outside calendar.
 * **Reader and Writer hand-off**, or Reader's ink and annotation tools. There is no agreed hand-off contract yet.
 * **Sharing, accounts and sync between computers.** SPlanner is single-user and loopback-only on purpose.
-* **SLAI agents** (scheduling help, planning proposals). They need a consent and proposal contract first.
+* **A screen for agent proposals.** Backend only: a proposal for one event or task is created with `POST /api/proposals`, listed with
+  `GET /api/proposals`, and applied only when a person approves it with `POST /api/proposals/{id}/approve` (or dropped with `/reject`).
+  The interface has no screen for it, so `capabilities.agentSuggestions` stays false. Notes, stickies and reminders are not covered.
+  The commit goes through SLAI's reconciliation store; see `commits.py`. No agent in SLAI currently creates SPlanner proposals.
 * **Rich text in notes.** The editor is plain text. A note that has formatting, images, signatures or comments (for example one
   edited in Reader or Writer) is opened read-only with a message, rather than flattened and damaged.
 * **Recovering unsaved typing after a crash.** Notes save a moment after you pause typing, and the page asks before it is

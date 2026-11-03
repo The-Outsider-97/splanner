@@ -44,7 +44,7 @@ class StoreCase(unittest.TestCase):
 
 class EventTests(StoreCase):
     def test_fresh_database_is_current(self) -> None:
-        self.assertEqual((self.store.db.schema_version, self.store.db.migrated), (3, [1, 2, 3]))
+        self.assertEqual((self.store.db.schema_version, self.store.db.migrated), (4, [1, 2, 3, 4]))
 
     def test_create_read_update_delete(self) -> None:
         e = self.event(description="Daily\nsync", location="Room 4", color="green", all_day=False)
@@ -371,7 +371,7 @@ class LegacyUpgradeTests(unittest.TestCase):
 
             store = PlannerStore(data)
             try:
-                self.assertEqual(store.db.schema_version, 3)
+                self.assertEqual(store.db.schema_version, 4)
                 self.assertIsNotNone(store.db.migration_backup)
                 assert store.db.migration_backup is not None
                 self.assertTrue(store.db.migration_backup.is_file())

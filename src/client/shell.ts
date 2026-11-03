@@ -1,5 +1,4 @@
-/** The application frame: sidebar (brand, workspace, navigation, mini calendar, data and appearance), topbar and page heading.
- *  It mounts the active view into #view and tears it down when the person navigates away. */
+/** SPlanner shell: workspace, navigation, calendar and SLAI ecosystem actions. */
 import { clear, glyph, h, plural, replace } from './kit.js';
 import type { MountedView, ViewContext } from './context.js';
 import { showCreateMenu } from './editors.js';
@@ -14,9 +13,11 @@ import { mountNotes } from './views/notes.js';
 import { mountBoard } from './views/board.js';
 import { addMonths, formatDayLong, formatMonthYear, formatWeekRange, isoDate, monthGrid, sameDay, startOfDay, weekDays, weekdayNames } from '../core/dates.js';
 import type { ViewName } from '../core/types.js';
+import { loadActiveWorkspace, openWorkspaceDialog } from './workspaces.js';
+import { enableSLDCDrop, openDocumentImport } from './document-import.js';
+import { openSharePlanner } from './sharing.js';
 
 interface ViewInfo { label: string; icon: string; eyebrow: string; title: string; dates: boolean }
-
 const VIEW_INFO: Record<ViewName, ViewInfo> = {
   today: { label: 'Today', icon: 'home', eyebrow: 'A FRESH DAY TO MAKE PROGRESS', title: 'Good to see you.', dates: true },
   calendar: { label: 'Calendar', icon: 'calendar', eyebrow: 'YOUR SCHEDULE', title: 'Calendar', dates: true },
@@ -30,8 +31,8 @@ export function mountShell(root: HTMLElement, ctx: ViewContext): void {
   const { store, ui, alerts } = ctx;
   let view: MountedView | null = null;
   let miniAnchor = new Date(ui.focus);
+  let activeWorkspaceName = store.prefs.workspace_name;
 
-  // ---------------------------------------------------------------- sidebar
   const navLinks = new Map<ViewName, HTMLAnchorElement>();
   const nav = h('nav', { class: 'nav-list', attrs: { 'aria-label': 'Main' } }, NAV.map((name) => {
     const a = h('a', { class: 'nav-item', href: `#/${name}` }, glyph(VIEW_INFO[name].icon), h('span', { text: VIEW_INFO[name].label }));
@@ -39,9 +40,11 @@ export function mountShell(root: HTMLElement, ctx: ViewContext): void {
     return a;
   }));
   const workspaceName = h('strong', { class: 'clip' });
+  const workspaceLabel = h('small', { text: 'Personal · Local account' });
   const avatarSlot = h('span', {});
-  const workspace = h('button', { class: 'workspace', type: 'button', attrs: { 'aria-label': 'Workspace settings' }, on: { click: () => openSettingsDialog(ctx) } },
-    avatarSlot, h('span', { class: 'workspace-text' }, workspaceName, h('small', { text: 'Personal · Local account' })), glyph('chevron-down'));
+  const workspace = h('button', { class: 'workspace', type: 'button', attrs: { 'aria-label': 'Manage workspaces' },
+    on: { click: () => openWorkspaceDialog(ctx, (name) => { activeWorkspaceName = name; drawIdentity(); }) } },
+    avatarSlot, h('span', { class: 'workspace-text' }, workspaceName, workspaceLabel), glyph('chevron-down'));
   const miniTitle = h('strong', { class: 'mini-title', attrs: { 'aria-live': 'polite' } });
   const miniGrid = h('div', { class: 'mini-grid' });
   const mini = h('section', { class: 'mini-calendar', attrs: { 'aria-label': 'Mini calendar' } },
@@ -52,19 +55,23 @@ export function mountShell(root: HTMLElement, ctx: ViewContext): void {
     h('div', { class: 'brand' }, h('img', { class: 'brand-mark', src: '/assets/img/logo.svg', alt: '', attrs: { width: 36, height: 36 } }), h('span', { class: 'brand-text' }, 'SPlanner', h('small', { text: 'INTELLIGENT WORKSPACE' }))),
     workspace, nav, mini,
     h('div', { class: 'side-bottom' },
+      h('button', { class: 'side-link', type: 'button', on: { click: () => openDocumentImport(ctx) } }, glyph('note'), h('span', { text: 'Import SLDC document' })),
+      h('button', { class: 'side-link', type: 'button', on: { click: () => openSharePlanner(ctx) } }, glyph('user'), h('span', { text: 'Shared planners' })),
       h('button', { class: 'side-link', type: 'button', on: { click: () => openDataDialog(ctx) } }, glyph('laptop'), h('span', { text: 'Stored on this device' })),
       h('button', { class: 'side-link', type: 'button', on: { click: () => openSettingsDialog(ctx) } }, glyph('settings'), h('span', { class: 'grow', text: 'Appearance' }), glyph('chevron-right'))));
-  // ---------------------------------------------------------------- topbar and heading
   const crumb = h('span', { class: 'crumb-current' });
   const badge = h('span', { class: 'bubble', hidden: true, attrs: { 'aria-hidden': 'true' } });
   const bell = h('button', { class: 'iconbtn', type: 'button', attrs: { 'aria-label': 'Reminders' }, on: { click: () => openRemindersDialog(ctx, alerts) } }, glyph('bell'), badge);
   const createButton: HTMLButtonElement = h('button', { class: 'btn primary', type: 'button', attrs: { 'aria-haspopup': 'menu' }, on: { click: () => showCreateMenu(ctx, createButton) } }, glyph('plus'), 'Create new');
   const menuButton = h('button', { class: 'iconbtn menu-toggle', type: 'button', attrs: { 'aria-label': 'Open the sidebar', 'aria-controls': 'sidebar', 'aria-expanded': 'false' },
     on: { click: () => { const open = !shell.classList.contains('nav-open'); shell.classList.toggle('nav-open', open); menuButton.setAttribute('aria-expanded', String(open)); } } }, glyph('menu'));
+  const syncState = h('span', { class: 'local-pill', attrs: { role: 'status', 'aria-live': 'polite' }, title: 'Remote collaboration status' },
+    h('span', { class: 'dot', attrs: { 'aria-hidden': 'true' } }), 'Local mode');
   const topbar = h('header', { class: 'topbar' }, menuButton,
     h('div', { class: 'breadcrumbs' }, h('span', { class: 'muted', text: 'Workspace' }), h('span', { class: 'crumb-sep', attrs: { 'aria-hidden': 'true' }, text: '/' }), crumb),
-    h('div', { class: 'grow' }),
-    h('span', { class: 'local-pill', title: 'Your data stays on this computer' }, h('span', { class: 'dot', attrs: { 'aria-hidden': 'true' } }), 'Local mode'),
+    h('div', { class: 'grow' }), syncState,
+    h('button', { class: 'iconbtn', type: 'button', attrs: { 'aria-label': 'Import SLDC', title: 'Import SLDC' }, on: { click: () => openDocumentImport(ctx) } }, glyph('note')),
+    h('button', { class: 'iconbtn', type: 'button', attrs: { 'aria-label': 'Share planner', title: 'Share planner' }, on: { click: () => openSharePlanner(ctx) } }, glyph('user')),
     h('button', { class: 'iconbtn', type: 'button', attrs: { 'aria-label': 'Search (Ctrl+K)', title: 'Search (Ctrl+K)' }, on: { click: () => openSearchDialog(ctx) } }, glyph('search')),
     bell, createButton);
 
@@ -82,7 +89,6 @@ export function mountShell(root: HTMLElement, ctx: ViewContext): void {
   const shell = h('div', { class: 'shell' }, sidebar, h('div', { class: 'main-col' }, topbar, main));
   replace(root, h('a', { class: 'skip', href: '#main', on: { click: (e) => { e.preventDefault(); main.focus(); } } }, 'Skip to the workspace'), shell);
 
-  // ---------------------------------------------------------------- drawing
   function drawMini(): void {
     const today = startOfDay(store.now());
     const weekStart = store.prefs.week_start;
@@ -101,7 +107,7 @@ export function mountShell(root: HTMLElement, ctx: ViewContext): void {
   }
 
   function drawIdentity(): void {
-    workspaceName.textContent = store.prefs.workspace_name;
+    workspaceName.textContent = activeWorkspaceName;
     replace(avatarSlot, avatar(store.prefs.initials));
   }
 
@@ -159,8 +165,9 @@ export function mountShell(root: HTMLElement, ctx: ViewContext): void {
   noticeHost.after(offlineBanner);
   store.offline.on((error) => { offlineBanner.hidden = error === null; });
 
-  // ---------------------------------------------------------------- wiring
   drawIdentity(); drawMini(); drawBadge(); drawNotices(); mountView();
+  void loadActiveWorkspace(ctx).then((ws) => { if (ws) { activeWorkspaceName = ws.name; drawIdentity(); } }).catch(() => undefined);
+  enableSLDCDrop(ctx);
   ui.changed.on((kind) => {
     if (kind === 'route') mountView();
     else { if (kind === 'focus') { miniAnchor = new Date(ui.focus); } headingText(); drawMini(); }
@@ -170,6 +177,22 @@ export function mountShell(root: HTMLElement, ctx: ViewContext): void {
     headingText();
   });
   alerts.changed.on(drawBadge);
+
+  async function syncStatus(): Promise<void> {
+    try {
+      const state = await store.api.get<{ configured: boolean; signed_in: boolean; status: string; pending: number; conflicts: number }>('/collaboration/status');
+      const label = !state.configured ? 'Local mode' : !state.signed_in ? 'Sharing · Sign in'
+        : state.conflicts ? `Sync conflict (${state.conflicts})` : state.pending ? `Pending (${state.pending})` : state.status.replace(/_/g, ' ');
+      replace(syncState, h('span', { class: 'dot', attrs: { 'aria-hidden': 'true' } }), label);
+      workspaceLabel.textContent = state.signed_in ? 'Personal · Sharing enabled' : 'Personal · Local account';
+      if (state.configured && state.signed_in && !state.conflicts) {
+        const result = await store.api.post<{ received: number }>('/collaboration/sync', {});
+        if (result.received > 0) await store.refresh();
+      }
+    } catch { /* Offline state is shown separately. */ }
+  }
+  void syncStatus();
+  window.setInterval(() => { void syncStatus(); }, 45_000);
 
   document.addEventListener('keydown', (event) => {
     const target = event.target as HTMLElement | null;

@@ -118,10 +118,23 @@ V3 = (
 )
 
 
+V4 = (
+    # Changes an agent or workflow proposes to an event or task. A proposal is applied only after a person has consented to it (see commits.py).
+    """CREATE TABLE IF NOT EXISTS proposals (
+         id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('event','task')), item_id TEXT NOT NULL, base_version INTEGER NOT NULL,
+         changes TEXT NOT NULL, title TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','rejected','executed','failed')),
+         consent TEXT, outcome TEXT, created_at TEXT NOT NULL, decided_at TEXT)""",
+    "CREATE INDEX IF NOT EXISTS proposals_by_status ON proposals(status, created_at)",
+    # Decisions on commit requests, by idempotency key, written in the same transaction as the change they record.
+    "CREATE TABLE IF NOT EXISTS commit_ledger (idempotency_key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, created_at TEXT NOT NULL)",
+)
+
+
 def migrations(note_dir: Path) -> list[Migration]:
     return [Migration(1, "SPlanner 0.1 schema", V1), Migration(2, "events: location and reminders; tasks: notes and completion time; "
                                                                   "notes: kind, pin and derived search columns", _v2_steps(note_dir)),
-            Migration(3, "events: repeat rule and single changes; reminders: occurrence; stickies: size", V3)]
+            Migration(3, "events: repeat rule and single changes; reminders: occurrence; stickies: size", V3),
+            Migration(4, "proposals awaiting a person's consent; commit ledger", V4)]
 
 
 def _local_date(instant: str, zone_name: str) -> str:
@@ -395,6 +408,40 @@ class PlannerStore:
         except ValueError as exc:                                  # SLDCError derives from ValueError
             raise StorageError("This note's file could not be read.", reason="corrupt", details={"note": note_id, "error": type(exc).__name__}) from exc
 
+    NEWER_NOTICE = ("This note was saved by a newer program and uses features this SPlanner doesn't understand, so only its text is shown and it is "
+                    "read-only here. Open the .sldc file in Reader or Writer to change it.")
+
+    def _open_note(self, note_id: str) -> tuple[Any, dict[str, Any] | None]:
+        """``(package, None)`` for a note this SPlanner reads in full, ``(None, preview)`` for one written by a newer program that needs features
+        it lacks (a text-only view, never to be saved), and a ``StorageError`` for a missing, damaged or far-too-new file."""
+        module = slai.sldc()
+        path = self._package_path(note_id)
+        try:
+            return self._read_package(note_id), None
+        except StorageError as exc:
+            cause = exc.__cause__
+            if not isinstance(cause, module.SLDCError) or isinstance(cause, (module.SLDCIntegrityError, module.SLDCDecryptionError)):
+                raise
+            try:
+                newer = isinstance(cause, module.SLDCUnsupportedError) or bool(module.inspect_package(path).get("newer_than_known"))
+                if not newer:
+                    raise
+                return None, module.preview_package(path)
+            except module.SLDCError as inner:                      # a new MAJOR edition, or a file that cannot be read even as text
+                raise StorageError("This note was saved by a newer program than this SPlanner understands." if isinstance(inner, module.SLDCUnsupportedError)
+                                   else "This note's file could not be read.", reason="corrupt",
+                                   details={"note": note_id, "error": type(inner).__name__}) from inner
+
+    @staticmethod
+    def _plain_note(package: Any) -> bool:
+        """True when the note is exactly what SPlanner writes: one paragraph of plain text, unsigned, with nothing attached to the paragraph
+        (formatting, inline equations or pictures, comments' anchors and the like live in extra keys that editing the text would break)."""
+        module = slai.sldc()
+        if module.version_key(package.version) > module.version_key(module.KNOWN_VERSION):
+            return False                                            # a newer edition than this module can write back: never rewrite it
+        blocks = package.document["blocks"]
+        return not package.signatures and len(blocks) == 1 and blocks[0]["type"] == "paragraph" and set(blocks[0]) <= {"id", "type", "text"}
+
     def _write_package(self, note_id: str, title: str, text: str, *, overwrite: bool, package: Any = None) -> None:
         module = slai.sldc()
         if package is None:
@@ -423,10 +470,12 @@ class PlannerStore:
 
     def get_note(self, item_id: str) -> dict[str, Any]:
         row = self._fetch("notes", item_id, "note")
-        package = self._read_package(item_id)
+        package, preview = self._open_note(item_id)
         module = slai.sldc()
-        editable = not package.signatures and len(package.document["blocks"]) == 1 and package.document["blocks"][0]["type"] == "paragraph"
-        return {**self._note_out(row), "content": module.extract_text(package), "editable": editable}
+        if package is None:                                         # written by a newer program: show its text, change nothing
+            text = "\n\n".join(block["text"] for block in preview["blocks"]) if preview else ""
+            return {**self._note_out(row), "content": text, "editable": False, "notice": self.NEWER_NOTICE}
+        return {**self._note_out(row), "content": module.extract_text(package, validate=False), "editable": self._plain_note(package)}
 
     def create_note(self, data: dict[str, Any], *, kind: str = "note") -> dict[str, Any]:
         self._unknown(data, self.NOTE_FIELDS, "note")
@@ -457,11 +506,13 @@ class PlannerStore:
             if "pinned" in data:
                 changes["pinned"] = int(v.boolean(data["pinned"], "pinned"))
             if "title" in data or "content" in data:
-                package = self._read_package(item_id)
+                package, _preview = self._open_note(item_id)
+                if package is None:
+                    raise Conflict("This note was saved by a newer program, so it can't be changed here without losing parts of it.", hint="Open it in Reader or Writer.")
                 if package.signatures:
                     raise Conflict("This note is signed, so it can't be changed here.", hint="Open it in Reader or Writer.")
                 blocks = package.document["blocks"]
-                if len(blocks) != 1 or blocks[0]["type"] != "paragraph":
+                if not self._plain_note(package):
                     raise Conflict("This note has advanced content that SPlanner can't edit without losing it.", hint="Open it in Reader or Writer.")
                 title = v.text(data.get("title", old["title"]), "title", TITLE)
                 content = v.text(data.get("content", blocks[0]["text"]), "content", NOTE_TEXT if old["kind"] == "note" else STICKY_TEXT,

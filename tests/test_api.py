@@ -185,7 +185,7 @@ class WorkspaceTests(ApiCase):
         made = self.data("POST", "/api/backup", {}, 201)
         self.assertTrue((Path(made["folder"]) / made["name"]).is_file())
         status = self.data("GET", "/api/status")
-        self.assertEqual((status["integrity"], status["schemaVersion"]), ("ok", 3))
+        self.assertEqual((status["integrity"], status["schemaVersion"]), ("ok", 4))
         self.assertIn(made["name"], [b["name"] for b in status["backups"]])
 
     def test_oversized_bodies_are_refused(self) -> None:

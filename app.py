@@ -1,5 +1,8 @@
-"""SPlanner's application object, settings, preferences and start-up. The shared mechanics (server, token handshake, config, database,
-preferences file, SLAI lookup) come from ``applications.tools``; only what is specific to a planner is here."""
+"""SPlanner local-first application entrypoint with workspace, SLDC and collaboration integration.
+
+Shared server/database/validation/SLDC APIs remain owned by applications.tools
+and src.utils.sldc. Remote sharing never exposes this loopback server.
+"""
 from __future__ import annotations
 
 import argparse
@@ -13,11 +16,13 @@ from typing import Any
 from ..tools import slai
 from ..tools.config import Field, load_section
 from ..tools.errors import AppError
-from ..tools.server import Identity, LocalServer, Router, ServerOptions, add_server_arguments, refuse_remote_host, serve
+from ..tools.server import Identity, LocalServer, ServerOptions, add_server_arguments, refuse_remote_host, serve
 from ..tools.storage import Pref, Prefs, default_data_dir
 from ..tools.validation import utc_now
 from . import __version__
-from .store import PlannerStore
+from .workspace_store import WorkspaceStore as PlannerStore
+from .collaboration_client import CollaborationClient
+from .collaboration_sync import CollaborationSync
 
 SLUG, TITLE, DEFAULT_PORT = "splanner", "SPlanner", 8769
 HERE = Path(__file__).resolve().parent
@@ -26,17 +31,17 @@ DEFAULT_CONFIG = HERE / "configs" / "config.yaml"
 SETTINGS_FIELDS = {
     "port": Field(DEFAULT_PORT, 1, 65535),
     "reminder_poll_seconds": Field(20, 5, 3600),
-    "max_request_bytes": Field(524_288, 16_384, 8 * 1024 * 1024),
+    "max_request_bytes": Field(8 * 1024 * 1024, 16_384, 8 * 1024 * 1024),
     "backup_every_days": Field(7, 0, 365),
     "backup_keep": Field(8, 1, 100),
+    "sldc_import_max_bytes": Field(5 * 1024 * 1024, 1024, 5 * 1024 * 1024),
+    "collaboration_url": Field("", kind=str),
 }
 
 SOUNDS = tuple([f"notification_{n:02d}" for n in range(1, 10)] + [f"accepted_{n:02d}" for n in range(1, 4)] +
                [f"ringtone_{n:02d}" for n in range(1, 6)] + [f"warning_alert_{n:02d}" for n in range(1, 3)])
 VIEWS = ("today", "calendar", "tasks", "notes", "board")
 
-# Personal choices, saved in prefs.json next to the database. Every value is validated here, on the server, so a hand-edited file can
-# never put the interface in a state it cannot display (the Prefs class drops anything invalid and says so).
 PREF_SCHEMA = {
     "theme": Pref(str, allowed=("system", "light", "dark", "contrast")),
     "scale": Pref(float, low=0.85, high=1.4),
@@ -69,6 +74,8 @@ class Settings:
     max_request_bytes: int
     backup_every_days: int
     backup_keep: int
+    sldc_import_max_bytes: int
+    collaboration_url: str
     data_dir: Path
     config_path: Path
     note: str | None = None
@@ -81,14 +88,14 @@ def load_settings(config: str | None = None, data_dir: str | None = None, port: 
 
 
 class PlannerApp:
-    """Everything a request handler needs, passed explicitly instead of through module globals."""
-
     def __init__(self, settings: Settings, store: PlannerStore, prefs: Prefs, root: Path | None) -> None:
         self.settings = settings
         self.store = store
         self.prefs = prefs
         self.root = root
         self.started = time.time()
+        self.collaboration = CollaborationClient(settings.collaboration_url)
+        self.sync = CollaborationSync(store, self.collaboration)
 
     def preferences(self) -> dict[str, Any]:
         return {**PREF_DEFAULTS, **self.prefs.snapshot()}
@@ -100,12 +107,12 @@ class PlannerApp:
         if self.prefs.recovered:
             found.append({"kind": "warn", "text": self.prefs.recovered})
         if not slai.sldc_info()["available"]:
-            found.append({"kind": "warn", "text": "SLAI's SLDC module was not found, so notes and sticky notes can't be opened or saved. "
-                                                    "Events, tasks and reminders still work. Start SPlanner inside the SLAI folder or pass --slai-root."})
+            found.append({"kind": "warn", "text": "SLAI's SLDC module was not found. Notes and document import are unavailable. "
+                                                    "Start SPlanner within the SLAI checkout or use --slai-root."})
         if self.store.db.upgraded:
             backup = self.store.db.migration_backup
-            found.append({"kind": "info", "text": "Your SPlanner data was upgraded to the new format." +
-                          (f" A copy from before the upgrade is in {backup.parent}." if backup else "")})
+            found.append({"kind": "info", "text": "Your SPlanner data was upgraded." +
+                          (f" A pre-migration database backup is stored in {backup.parent}." if backup else "")})
         return found
 
     def bootstrap(self) -> dict[str, Any]:
@@ -113,15 +120,16 @@ class PlannerApp:
             "app": {"name": TITLE, "version": __version__, "slai": slai.status(self.root)},
             "settings": {"reminderPollSeconds": self.settings.reminder_poll_seconds},
             "prefs": self.preferences(), "sounds": list(SOUNDS), "notices": self.notices(),
-            "capabilities": {"sldc": bool(slai.sldc_info()["available"]), "recurrence": True, "sharing": False, "agentSuggestions": False,
-                             "backgroundAlerts": False},
+            "capabilities": {"sldc": bool(slai.sldc_info()["available"]), "recurrence": True,
+                             "sharing": self.collaboration.available, "agentSuggestions": False, "backgroundAlerts": False},
+            "workspaces": {"active_id": self.store.current_workspace_id, "list": self.store.list_workspaces()},
+            "collaboration": self.sync.summary(),
             "storage": {"dataDir": str(self.settings.data_dir), "backupsDir": str(self.store.backups_dir)},
             "counts": self.store.counts(), "data": self.store.snapshot(), "now": utc_now(),
         }
 
 
 def automatic_backup(store: PlannerStore, settings: Settings) -> Path | None:
-    """One database copy per ``backup_every_days`` (while there is something worth saving), pruned to ``backup_keep``."""
     if settings.backup_every_days <= 0:
         return None
     folder = store.backups_dir
@@ -131,7 +139,7 @@ def automatic_backup(store: PlannerStore, settings: Settings) -> Path | None:
     if not empty and (not existing or time.time() - existing[-1].stat().st_mtime >= settings.backup_every_days * 86400):
         made = store.backup("auto")
         existing.append(made)
-    for old in existing[: max(0, len(existing) - settings.backup_keep)]:
+    for old in existing[:max(0, len(existing) - settings.backup_keep)]:
         try:
             old.unlink()
         except OSError:
@@ -139,9 +147,12 @@ def automatic_backup(store: PlannerStore, settings: Settings) -> Path | None:
     return made
 
 
-def build_server(settings: Settings, token: str, *, root: Path | None, client_dir: Path | None = None, host: str = "127.0.0.1") -> tuple[LocalServer, PlannerApp]:
+def build_server(settings: Settings, token: str, *, root: Path | None,
+                 client_dir: Path | None = None, host: str = "127.0.0.1") -> tuple[LocalServer, PlannerApp]:
     from .routes import router
+    from .v24_routes import register
 
+    register(router)
     store = PlannerStore(settings.data_dir)
     try:
         prefs = Prefs(settings.data_dir / "prefs.json", PREF_SCHEMA)
@@ -186,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"notice: the automatic backup was skipped ({getattr(exc, 'message', exc)})", file=sys.stderr)
         made = None
     notes = [n["text"] for n in app.notices()] + ([f"Database backed up to {made}"] if made else [])
-    details = [("Data", str(settings.data_dir)), ("SLAI", str(root) if root else "not found"), ("Config", str(settings.config_path))]
+    details = [("Data", str(settings.data_dir)), ("SLAI", str(root) if root else "not found"),
+               ("Config", str(settings.config_path)),
+               ("Collaboration", settings.collaboration_url or "Not configured")]
     return serve(server, title=TITLE, version=__version__, url=f"http://127.0.0.1:{server.port}/?token={token}", details=details,
                  notes=notes, open_browser=not args.no_browser, on_close=app.store.close)

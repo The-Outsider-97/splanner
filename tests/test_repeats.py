@@ -276,7 +276,7 @@ class UpgradeFromVersionTwoTests(unittest.TestCase):
             db.close()
             store = PlannerStore(data)
             try:
-                self.assertEqual((store.db.schema_version, store.db.migrated), (3, [3]))
+                self.assertEqual((store.db.schema_version, store.db.migrated), (4, [3, 4]))
                 self.assertIsNotNone(store.db.migration_backup)
                 [event] = store.list_events()
                 self.assertEqual((event["title"], event["version"], event["recurrence"], event["exceptions"]), ("Old", 2, None, {}))

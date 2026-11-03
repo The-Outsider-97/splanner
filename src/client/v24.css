@@ -1,0 +1,30 @@
+/* SPlanner v2.4 workspace/import/collaboration layout. UI controls, typography,
+   themes, focus handling and dialog behavior continue to come from SLAI's shared kit. */
+.workspace-manager-list, .import-proposals, .workspace-manager-edit, .workspace-remote-row { display: grid; gap: .6rem; }
+.workspace-manager-row { display: flex; gap: .55rem; align-items: center; padding: .6rem; border-radius: 12px; border: var(--bw) solid var(--hairline); background: var(--surface-2); }
+.workspace-manager-row > .grow, .workspace-remote-row > .grow { min-width: 0; flex: 1; display: grid; gap: .1rem; }
+.workspace-manager-row .btn { white-space: nowrap; }
+.workspace-manager-edit { margin-top: 1rem; padding: .8rem; background: var(--surface-2); border-radius: 12px; }
+.workspace-form, .workspace-remote-row { min-width: 0; }
+.workspace-form > .row { flex-wrap: wrap; }
+.workspace-color-dot { display: inline-block; flex: 0 0 12px; height: 12px; border-radius: 50%; background: var(--accent); }
+.workspace-color-dot.color-violet { background: #8068ba; }
+.workspace-color-dot.color-green { background: #56a58e; }
+.workspace-color-dot.color-pink { background: #de7d98; }
+.workspace-color-dot.color-amber { background: #d4a94f; }
+.import-proposals { max-height: min(52vh, 650px); overflow: auto; padding-right: .3rem; }
+.import-proposal { display: grid; gap: .55rem; padding: .85rem; border: var(--bw) solid var(--hairline); border-radius: 14px; background: var(--surface-2); }
+.import-proposal > .row { align-items: center; }
+.import-proposal > .row .grow { flex: 1; min-width: 0; }
+.import-proposal .row select { max-width: 11rem; }
+.import-field { min-width: 0; display: grid; gap: .28rem; }
+.import-field > input, .import-field > textarea, .import-field > select { width: 100%; max-width: 100%; }
+.import-warning { padding: .35rem .5rem; border-radius: 8px; margin: 0; background: var(--accent-soft); color: var(--text); }
+.workspace-manager-edit h3, .workspace-form h3, .import-proposal h3 { margin: .3rem 0; }
+@media (max-width: 680px) {
+  .workspace-manager-row { flex-wrap: wrap; }
+  .workspace-manager-row .grow { flex-basis: 100%; }
+  .import-proposals { max-height: 48vh; }
+  .import-proposal > .row { flex-wrap: wrap; }
+  .workspace-form .row { flex-wrap: wrap; }
+}
