@@ -15,6 +15,7 @@ async function start() {
         await store.load();
     }
     catch (error) {
+        window.dispatchEvent(new CustomEvent('slai:startup-error', { detail: errorText(error) }));
         replace(root, h('div', { class: 'boot-error card', attrs: { role: 'alert' } }, h('h1', { text: 'SPlanner can’t start' }), h('p', { text: errorText(error) }), h('p', { class: 'muted', text: 'Open SPlanner from the link its console window printed, or start it again with: python -m applications.splanner' })));
         return;
     }
@@ -30,6 +31,7 @@ async function start() {
     const ctx = { ...base, alerts };
     mountShell(root, ctx);
     alerts.start();
+    window.dispatchEvent(new Event('slai:ready'));
     window.addEventListener('pageshow', (event) => { if (event.persisted)
         void store.refresh(); });
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible')
